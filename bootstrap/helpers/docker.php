@@ -149,6 +149,56 @@ function executeInDocker(string $containerId, string $command)
     return "docker exec {$containerId} bash -c '{$escapedCommand}'";
 }
 
+function dockerNetworkExistsCommand(string $network): string
+{
+    $safeNetwork = escapeshellarg($network);
+
+    return "docker network inspect {$safeNetwork} >/dev/null 2>&1";
+}
+
+function dockerNetworkIpv6EnabledCommand(string $network): string
+{
+    $safeNetwork = escapeshellarg($network);
+
+    return "docker network inspect --format '{{.EnableIPv6}}' {$safeNetwork} 2>/dev/null | grep -Fxq true";
+}
+
+function dockerNetworkCreateCommand(string $network, bool $isSwarm = false, bool $preferIpv6 = false, bool $suppressOutput = false): string
+{
+    $safeNetwork = escapeshellarg($network);
+    $outputRedirect = $suppressOutput ? ' >/dev/null 2>&1' : '';
+
+    if ($isSwarm) {
+        return "docker network create --driver overlay --attachable {$safeNetwork}{$outputRedirect}";
+    }
+
+    $plainCreate = "docker network create --attachable {$safeNetwork}{$outputRedirect}";
+
+    if (! $preferIpv6) {
+        return $plainCreate;
+    }
+
+    $ipv6Redirect = $suppressOutput ? ' >/dev/null 2>&1' : ' 2>/dev/null';
+    $ipv6Create = "docker network create --ipv6 --attachable {$safeNetwork}{$ipv6Redirect}";
+
+    return "({$ipv6Create} || {$plainCreate})";
+}
+
+function dockerNetworkEnsureCommand(string $network, bool $isSwarm = false, bool $preferIpv6 = false, bool $warnIfIpv4Only = false, bool $suppressOutput = false): string
+{
+    $inspectCommand = dockerNetworkExistsCommand($network);
+    $createCommand = dockerNetworkCreateCommand($network, $isSwarm, $preferIpv6, $suppressOutput);
+
+    if ($isSwarm || ! $preferIpv6 || ! $warnIfIpv4Only) {
+        return "{$inspectCommand} || {$createCommand}";
+    }
+
+    $ipv6CheckCommand = dockerNetworkIpv6EnabledCommand($network);
+    $warning = escapeshellarg("Coolify proxy network {$network} exists without IPv6. Recreate it during a maintenance window so IPv6 clients keep their real IP in X-Forwarded-For.");
+
+    return "(if ! {$inspectCommand}; then {$createCommand}; elif {$ipv6CheckCommand}; then true; else echo {$warning}; fi)";
+}
+
 function getContainerStatus(Server $server, string $container_id, bool $all_data = false, bool $throwError = false)
 {
     if ($server->isSwarm()) {
